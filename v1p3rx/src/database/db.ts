@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { env } from '../config/env';
@@ -6,9 +6,41 @@ import { logger } from '../utils/logger';
 import { migrations } from './migrations';
 
 fs.mkdirSync(env.dataDir, { recursive: true });
-export const db = new Database(path.join(env.dataDir, 'v1p3rx.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const raw = new DatabaseSync(path.join(env.dataDir, 'v1p3rx.db'));
+raw.exec('PRAGMA journal_mode = WAL');
+raw.exec('PRAGMA foreign_keys = ON');
+
+interface Stmt {
+  run(...params: unknown[]): unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  get(...params: unknown[]): any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  all(...params: unknown[]): any[];
+}
+
+/**
+ * Thin wrapper over Node's built-in SQLite (no native compilation needed).
+ * Keeps the API small so swapping to PostgreSQL later only touches this file.
+ */
+export const db = {
+  prepare: (sql: string): Stmt => raw.prepare(sql) as unknown as Stmt,
+  exec: (sql: string): void => raw.exec(sql),
+  close: (): void => raw.close(),
+  /** Returns a function that runs `fn` inside a transaction (rolls back on error). */
+  transaction<T>(fn: () => T): () => T {
+    return () => {
+      raw.exec('BEGIN IMMEDIATE');
+      try {
+        const result = fn();
+        raw.exec('COMMIT');
+        return result;
+      } catch (err) {
+        raw.exec('ROLLBACK');
+        throw err;
+      }
+    };
+  },
+};
 
 export function migrate(): void {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)');
